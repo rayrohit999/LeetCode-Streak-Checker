@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import json
 from typing import Dict, Optional
 import requests
-token = "7548755184:AAEprqJKX2urZrxLP7nC-Qt9li8WumSuKQE"
+token = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{token}"
 
 # File to store user data persistently
