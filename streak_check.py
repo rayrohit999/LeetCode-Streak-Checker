@@ -269,20 +269,34 @@ Use <code>/register your_leetcode_username</code> to begin tracking your streak!
         if text.startswith("/register"):
             parts = text.split()
             if len(parts) != 2:
+                logger.warning(f"Invalid register command from {chat_id}: {text}")
                 send_telegram_message(chat_id, "❌ Please provide your LeetCode username.\n"
                                     "Example: /register johndoe")
                 return
 
             leetcode_username = parts[1]
+            logger.info(f"Registration attempt: chat_id={chat_id}, username={leetcode_username}")
+            
+            # Check if user is already registered
+            if str(chat_id) in users:
+                current_username = users[str(chat_id)]
+                logger.info(f"User {chat_id} already registered with username: {current_username}")
+                send_telegram_message(chat_id, f"ℹ️ You're already registered with username: {current_username}\n"
+                                    f"To change username, contact support or re-register.")
+                return
             
             # Validate username first
+            logger.info(f"Validating LeetCode username: {leetcode_username}")
             if not validate_leetcode_username(leetcode_username):
+                logger.warning(f"Username validation failed for: {leetcode_username}")
                 send_telegram_message(chat_id, f"❌ LeetCode username '{leetcode_username}' not found or profile is private.\n"
                                     "Please check your username and make sure your profile is public.")
                 return
                 
             save_user(chat_id, leetcode_username)
-            send_telegram_message(chat_id, f"✅ Successfully registered with LeetCode username: {leetcode_username}")
+            logger.info(f"Successfully registered user: {chat_id} -> {leetcode_username}")
+            send_telegram_message(chat_id, f"✅ Successfully registered with LeetCode username: {leetcode_username}\n"
+                                f"🎯 You'll now receive daily streak reminders at 8:00 PM IST!")
             return
 
         if text.startswith("/check"):

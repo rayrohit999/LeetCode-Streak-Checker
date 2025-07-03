@@ -77,7 +77,8 @@ def home():
             "/set_webhook": "POST - Set webhook URL",
             "/health": "GET - Health check endpoint",
             "/stats": "GET - Bot statistics",
-            "/manual_check": "POST - Manually trigger check for all users"
+            "/manual_check": "POST - Manually trigger check for all users",
+            "/users": "GET - Detailed user information"
         },
         "status": "running",
         "scheduler": "active",
@@ -218,6 +219,28 @@ def scheduler_status():
         }), 200
     except Exception as e:
         logger.error(f"Scheduler status error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/users')
+def get_users():
+    """Get detailed user information for debugging."""
+    try:
+        user_details = []
+        for chat_id, username in users.items():
+            user_details.append({
+                "chat_id": chat_id,
+                "leetcode_username": username,
+                "registered_at": "Unknown"  # We could add timestamps in future
+            })
+        
+        return jsonify({
+            "total_users": len(users),
+            "users": user_details,
+            "raw_users_data": users,
+            "timestamp": datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Users endpoint error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.errorhandler(404)
