@@ -4,7 +4,9 @@ import logging
 import threading
 import time
 import schedule
-from datetime import datetime
+from datetime import datetime, time as dtime
+from typing import List
+from zoneinfo import ZoneInfo
 from streak_check import handle_webhook, set_webhook, check_all_users, get_user_leetcode, users
 
 # Configure logging
@@ -20,6 +22,46 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Timezone configuration
+IST = ZoneInfo("Asia/Kolkata")
+UTC = ZoneInfo("UTC")
+
+# Read desired IST check times from env (comma-separated HH:MM)
+# Defaults: 09:00, 13:30, 18:00, 20:00 (IST)
+CHECK_TIMES_IST = os.getenv("CHECK_TIMES_IST", "09:00,13:30,18:00,20:00")
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid time format '{value}', expected HH:MM")
+    h, m = int(parts[0]), int(parts[1])
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError(f"Invalid time '{value}'")
+    return h, m
+
+def ist_to_utc_hhmm(ist_hhmm: str) -> str:
+    """Convert an IST HH:MM string to a UTC HH:MM string for scheduling.
+    Uses today's date; only the HH:MM is returned for schedule.every().day.at()."""
+    h, m = _parse_hhmm(ist_hhmm)
+    # Use an arbitrary date (today) for conversion
+    now_utc = datetime.now(UTC)
+    # Construct IST datetime for today with given hour:minute
+    ist_dt_today = datetime(year=now_utc.year, month=now_utc.month, day=now_utc.day, hour=h, minute=m, tzinfo=IST)
+    # Convert to UTC time
+    utc_dt = ist_dt_today.astimezone(UTC)
+    return utc_dt.strftime("%H:%M")
+
+def get_scheduled_times_pairs() -> List[dict]:
+    """Return list of dicts with IST/UTC time strings for display/logging."""
+    pairs = []
+    for t in [t.strip() for t in CHECK_TIMES_IST.split(',') if t.strip()]:
+        try:
+            utc_t = ist_to_utc_hhmm(t)
+            pairs.append({"ist": t, "utc": utc_t})
+        except Exception as e:
+            logger.error(f"Skipping invalid time '{t}': {e}")
+    return pairs
+
 # Scheduler setup
 def scheduled_streak_check():
     """Run scheduled check for all users."""
@@ -32,12 +74,21 @@ def scheduled_streak_check():
         logger.error(f"❌ Error in scheduled check: {e}")
 
 def run_scheduler():
-    """Run the scheduler in a separate thread."""
-    # Schedule daily check at 8:00 PM IST (changed from 11:40 for testing)
-    schedule.every().day.at("20:00").do(scheduled_streak_check)
-    
-    logger.info("📅 Scheduler started - Daily checks at 8:00 PM IST")
-    
+    """Run the scheduler in a separate thread with IST-aware times (converted to UTC)."""
+    # Clear any pre-existing jobs to avoid duplicates on restarts
+    schedule.clear()
+
+    times_pairs = get_scheduled_times_pairs()
+    if not times_pairs:
+        # Fallback to 20:00 IST -> 14:30 UTC
+        times_pairs = [{"ist": "20:00", "utc": "14:30"}]
+
+    for pair in times_pairs:
+        schedule.every().day.at(pair["utc"]).do(scheduled_streak_check)
+        logger.info(f"⏰ Scheduled daily streak check at {pair['ist']} IST ({pair['utc']} UTC)")
+
+    logger.info("📅 Scheduler started with IST-aware timings: " + ", ".join([p['ist'] for p in times_pairs]))
+
     while True:
         try:
             schedule.run_pending()
@@ -67,7 +118,7 @@ def home():
         "message": "LeetCode Streak Checker Bot API",
         "version": "1.0.0",
         "features": {
-            "automatic_daily_checks": "8:00 PM IST",
+            "automatic_daily_checks_ist": [p['ist'] for p in get_scheduled_times_pairs()],
             "manual_commands": "Available via Telegram",
             "webhook_support": "Real-time responses"
         },
@@ -101,7 +152,8 @@ def health_check():
             "registered_users": len(users),
             "scheduler_active": scheduler_jobs > 0,
             "scheduled_jobs": scheduler_jobs,
-            "next_scheduled_run": str(schedule.next_run()) if schedule.jobs else "No jobs scheduled",
+            "next_scheduled_run_utc": str(schedule.next_run()) if schedule.jobs else "No jobs scheduled",
+            "next_scheduled_run_ist": (schedule.next_run().replace(tzinfo=UTC).astimezone(IST).strftime('%Y-%m-%d %H:%M:%S IST') if schedule.jobs else "No jobs scheduled"),
             "timestamp": datetime.now().isoformat()
         }), 200
     except Exception as e:
@@ -123,8 +175,9 @@ def get_stats():
             "registered_users": list(users.keys()),
             "scheduler_status": "active" if schedule.jobs else "inactive",
             "scheduled_jobs": len(schedule.jobs),
-            "next_scheduled_check": next_run,
-            "daily_check_time": "8:00 PM IST",
+            "next_scheduled_check_utc": next_run,
+            "next_scheduled_check_ist": (schedule.next_run().replace(tzinfo=UTC).astimezone(IST).strftime('%Y-%m-%d %H:%M:%S IST') if schedule.jobs else "No scheduled jobs"),
+            "daily_check_times_ist": [p['ist'] for p in get_scheduled_times_pairs()],
             "bot_uptime": datetime.now().isoformat(),
             "status": "active"
         }), 200
@@ -203,19 +256,39 @@ def scheduler_status():
     try:
         jobs_info = []
         for job in schedule.jobs:
+            next_run_utc = job.next_run  # naive datetime in server local time (UTC on Render)
+            next_run_ist = None
+            if next_run_utc:
+                try:
+                    next_run_ist = next_run_utc.replace(tzinfo=UTC).astimezone(IST).strftime('%Y-%m-%d %H:%M:%S IST')
+                except Exception:
+                    next_run_ist = None
             jobs_info.append({
                 "job": str(job.job_func.__name__),
-                "next_run": str(job.next_run),
+                "next_run_utc": str(next_run_utc),
+                "next_run_ist": next_run_ist,
                 "interval": str(job.interval),
                 "unit": job.unit
             })
-        
+
+        next_run_global_utc = str(schedule.next_run()) if schedule.jobs else None
+        next_run_global_ist = None
+        if schedule.jobs and schedule.next_run():
+            try:
+                next_run_global_ist = schedule.next_run().replace(tzinfo=UTC).astimezone(IST).strftime('%Y-%m-%d %H:%M:%S IST')
+            except Exception:
+                next_run_global_ist = None
+
         return jsonify({
             "scheduler_active": len(schedule.jobs) > 0,
             "total_jobs": len(schedule.jobs),
             "jobs": jobs_info,
-            "next_run": str(schedule.next_run()) if schedule.jobs else None,
-            "current_time": datetime.now().isoformat()
+            "next_run_utc": next_run_global_utc,
+            "next_run_ist": next_run_global_ist,
+            "current_time_utc": datetime.now(UTC).isoformat(),
+            "current_time_ist": datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST'),
+            "configured_times_ist": [p['ist'] for p in get_scheduled_times_pairs()],
+            "configured_times_utc": [p['utc'] for p in get_scheduled_times_pairs()],
         }), 200
     except Exception as e:
         logger.error(f"Scheduler status error: {e}")
@@ -268,11 +341,11 @@ if __name__ == '__main__':
     logger.info(f"Starting Flask app on http://localhost:{port}")
     logger.info(f"Debug mode: {debug_mode}")
     logger.info(f"Registered users: {len(users)}")
-    logger.info(f"📅 Automatic daily checks scheduled at 8:00 PM IST")
+    logger.info(f"📅 Automatic daily checks (IST): {', '.join([p['ist'] for p in get_scheduled_times_pairs()])}")
     
     print(f"🚀 Starting LeetCode Streak Checker Bot API on http://localhost:{port}")
     print(f"📊 Currently tracking {len(users)} users")
-    print(f"⏰ Daily automatic checks at 8:00 PM IST")
+    print(f"⏰ Daily automatic checks (IST): {', '.join([p['ist'] for p in get_scheduled_times_pairs()])}")
     print(f"🔄 Scheduler: {'Active' if schedule.jobs else 'Inactive'}")
     
     # Run the Flask app
